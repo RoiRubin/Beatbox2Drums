@@ -25,12 +25,16 @@ public:
         listening.setButtonText("Listening");
         autoNoise.setButtonText("Auto noise floor");
         guardBtn.setButtonText("Breath guard");
+        fullBtn.setButtonText("Full level");
         learn.setButtonText("Learn room noise (2s)");
-        for (auto* c : std::initializer_list<juce::Component*> { &listening, &autoNoise, &guardBtn, &learn, &saveKit, &loadKit })
+        for (auto* c : std::initializer_list<juce::Component*> { &listening, &autoNoise, &guardBtn, &fullBtn, &learn, &saveKit, &loadKit })
             addAndMakeVisible(*c);
         listenAtt = std::make_unique<BA>(p.apvts, "active", listening);
         noiseAtt = std::make_unique<BA>(p.apvts, "noiseauto", autoNoise);
         guardAtt = std::make_unique<BA>(p.apvts, "guard", guardBtn);
+        fullAtt = std::make_unique<BA>(p.apvts, "fulllvl", fullBtn);
+        fullBtn.setTooltip("Every drum hit plays at full volume instead of following how loud you beatboxed. "
+                           "Segments whose volume you edited keep their own value.");
         learn.onClick = [this] { proc.startLearning(); };
         saveKit.onClick = [this] { doSaveKit(); };
         loadKit.onClick = [this] { doLoadKit(); };
@@ -43,7 +47,7 @@ public:
         addKnob(match, "Match tolerance", "match");
         addKnob(mix, "Drums mix", "mix");
 
-        for (auto* c : std::initializer_list<juce::Component*> { &recBtn, &playBtn, &analyseBtn, &saveMidi, &dragger, &saveWav, &audioDragger, &recStatus })
+        for (auto* c : std::initializer_list<juce::Component*> { &recBtn, &playBtn, &origBtn, &analyseBtn, &saveMidi, &dragger, &saveWav, &audioDragger, &recStatus })
             addAndMakeVisible(*c);
         recBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb3261e));
         playBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2e7d32));
@@ -53,7 +57,9 @@ public:
             else proc.startRecording();
         };
         analyseBtn.onClick = [this] { if (!proc.isRecording() && !proc.isCountingIn()) proc.analyseRecording(); };
-        playBtn.onClick = [this] { if (proc.isPlaying()) proc.stopPlayback(); else proc.startPlayback(); };
+        origBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2e7d32));
+        playBtn.onClick = [this] { if (proc.isPlaying()) proc.stopPlayback(); else { proc.stopOriginal(); proc.startPlayback(); } };
+        origBtn.onClick = [this] { if (proc.isPlayingOriginal()) proc.stopOriginal(); else proc.playOriginal(); };
         saveMidi.onClick = [this] { doSaveMidi(); };
         saveWav.onClick = [this] { doSaveWav(); };
         recStatus.setJustificationType(juce::Justification::centredLeft);
@@ -68,19 +74,38 @@ public:
 
         setResizable(true, true);
         setResizeLimits(1040, 740, 3000, 2000);
+        setWantsKeyboardFocus(true);   // Ctrl+Z / Ctrl+Y work from anywhere in the window
         setSize(1100, 880);
         updateVisibility();
         startTimerHz(30);
     }
 
+    void mouseDown(const juce::MouseEvent&) override { grabKeyboardFocus(); }
+
+    bool keyPressed(const juce::KeyPress& k) override
+    {
+        const auto mods = k.getModifiers();
+        if (mods.isCommandDown() && !mods.isAltDown())
+        {
+            const int code = (int) juce::CharacterFunctions::toUpperCase((juce::juce_wchar) k.getKeyCode());
+            if (code == 'Z') { if (mods.isShiftDown()) proc.redoStep(); else proc.undoStep(); return true; }
+            if (code == 'Y') { proc.redoStep(); return true; }
+        }
+        return false;
+    }
+
     void paint(juce::Graphics& g) override
     {
         g.fillAll(juce::Colour(0xff1b1e23));
+        g.setColour(juce::Colours::white.withAlpha(0.45f));
+        g.setFont(11.0f);
+        g.drawText(juce::String("v") + BB_VERSION + "  (built " + __DATE__ + " " + __TIME__ + ")", getWidth() - 310, getHeight() - 14, 300, 12,
+                   juce::Justification::centredRight);
         if (proc.getSlotsFree())
         {
             g.setColour(juce::Colours::white.withAlpha(0.35f));
             g.setFont(12.0f);
-            g.drawText("Drop a sample here to create a new drum", getWidth() - 340, getHeight() - 34, 330, 20,
+            g.drawText("Drop a sample here to create a new drum", getWidth() - 340, getHeight() - 36, 330, 20,
                        juce::Justification::centredRight);
         }
     }
@@ -111,6 +136,7 @@ public:
         listening.setBounds(top.removeFromLeft(100));
         autoNoise.setBounds(top.removeFromLeft(135));
         guardBtn.setBounds(top.removeFromLeft(110));
+        fullBtn.setBounds(top.removeFromLeft(100));
         learn.setBounds(top.removeFromLeft(160).reduced(0, 2));
         top.removeFromLeft(10);
         saveKit.setBounds(top.removeFromLeft(75).reduced(0, 2));
@@ -136,6 +162,7 @@ public:
         recBtn.setBounds(rec.removeFromLeft(95));       rec.removeFromLeft(4);
         analyseBtn.setBounds(rec.removeFromLeft(80));   rec.removeFromLeft(4);
         playBtn.setBounds(rec.removeFromLeft(70));      rec.removeFromLeft(4);
+        origBtn.setBounds(rec.removeFromLeft(105));     rec.removeFromLeft(4);
         saveMidi.setBounds(rec.removeFromLeft(95));     rec.removeFromLeft(4);
         dragger.setBounds(rec.removeFromLeft(135));     rec.removeFromLeft(4);
         saveWav.setBounds(rec.removeFromLeft(80));      rec.removeFromLeft(4);
@@ -256,6 +283,7 @@ private:
 
     void timerCallback() override
     {
+        proc.undoTick();
         updateVisibility();
         if (proc.takeAutoStop()) proc.analyseRecording();
         for (int s = 0; s < MAXD; ++s)
@@ -282,6 +310,10 @@ private:
         const bool pl = proc.isPlaying();
         playBtn.setButtonText(pl ? "Stop" : "Play");
         playBtn.setToggleState(pl, juce::dontSendNotification);
+        const bool po = proc.isPlayingOriginal();
+        origBtn.setButtonText(po ? "Stop original" : "Play original");
+        origBtn.setToggleState(po, juce::dontSendNotification);
+        origBtn.setEnabled(!rec && !countIn && proc.getRecLength() > 0);
         if (countIn) recStatus.setText("Count-in... " + juce::String(proc.getRecBpm(), 1) + " BPM, recording starts on the next bar", juce::dontSendNotification);
         else if (rec) recStatus.setText("Recording... " + juce::String(proc.getRecSeconds(), 1) + " s (max 30)", juce::dontSendNotification);
         else if (proc.getRecSeconds() > 0)
@@ -299,12 +331,12 @@ private:
     FileDragger dragger, audioDragger;
     ClipView clip;
     TimingBar timing;
-    juce::ToggleButton listening, autoNoise, guardBtn;
+    juce::ToggleButton listening, autoNoise, guardBtn, fullBtn;
     juce::TextButton learn, saveKit { "Save kit" }, loadKit { "Load kit" }, addBtn { "+ Add drum" };
-    juce::TextButton recBtn { "Record" }, analyseBtn { "Analyse" }, playBtn { "Play" }, saveMidi { "Save MIDI" }, saveWav { "Save WAV" };
+    juce::TextButton recBtn { "Record" }, analyseBtn { "Analyse" }, playBtn { "Play" }, origBtn { "Play original" }, saveMidi { "Save MIDI" }, saveWav { "Save WAV" };
     juce::Label status, recStatus;
     std::unique_ptr<juce::FileChooser> chooser;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt, noiseAtt, guardAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt, noiseAtt, guardAtt, fullAtt;
     Knob sens, nmargin, match, mix;
     std::array<std::unique_ptr<DrumRow>, MAXD> rows;
     int lastCount[MAXD] = {};

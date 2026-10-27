@@ -6,10 +6,13 @@
 #include <cmath>
 #include <algorithm>
 #include <memory>
+#include <array>
+#include <vector>
 
+static constexpr const char* BB_VERSION = "1.4";   // shown in the editor's bottom-left corner
 static constexpr int MAXD = 8;     // max drums
-static constexpr int NB = 16;      // spectral bands
-static constexpr int NF = NB + 1;  // + 1 decay feature
+static constexpr int NF = 2 * (12 + 2) + 1;   // features per hit: 2 sub-windows x (12 MFCC + brightness + noisiness) + decay
+static constexpr int MAXEX = 64;              // training examples kept per drum (oldest dropped)
 static constexpr int SYN_KICK = 0, SYN_SNARE = 1, SYN_HAT = 2, SYN_OPEN = 3, SYN_TOM = 4, SYN_IGNORE = 5;
 
 static juce::Colour slotColour(int i)
@@ -70,13 +73,7 @@ struct Sample
     double sr = 44100.0;
 };
 
-struct Template
-{
-    double sum[NF] = {}, sumsq[NF] = {};
-    int count = 0;
-    float mu[NF] = {}, isig[NF] = {};
-    bool valid = false;
-};
+using Feat = std::array<float, NF>;
 
 struct Voice
 {
@@ -90,5 +87,6 @@ struct RecHit
 {
     juce::int64 sample;
     int slot;
-    float vel;
+    float vel;            // loudness of the beatbox hit, 0.3..1
+    float vol = -1.0f;    // manual volume 0..1 set by the user, or -1 = automatic (loudness, or 100% in Full level)
 };

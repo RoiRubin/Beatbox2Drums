@@ -49,6 +49,7 @@ struct Quantizer
                 if (h[j].slot == hits[i].slot)
                 {
                     h[j].vel = juce::jmax(h[j].vel, hits[i].vel);
+                    if (h[j].vol < 0.0f) h[j].vol = hits[i].vol;
                     s[j] = s[j] || sel[i];
                     merged = true;
                 }

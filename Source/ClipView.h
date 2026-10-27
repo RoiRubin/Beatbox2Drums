@@ -106,11 +106,14 @@ public:
             g.drawRect(a, (float) wave.getY(), b - a, (float) (lane.getBottom() - wave.getY()), 1.0f);
         }
 
-        // playhead
-        if (proc.isPlaying())
+        drawVolumeLane(g, len);
+
+        // playhead (drums playback, or the original recording)
+        if (proc.isPlaying() || proc.isPlayingOriginal())
         {
+            const double pp = proc.isPlaying() ? (double) proc.getPlayPos() : (double) proc.getOriginalPos();
             g.setColour(juce::Colour(0xff3ddc84));
-            g.fillRect(sampleToX((double) proc.getPlayPos()) - 1.0f, (float) ruler.getY(), 2.0f, (float) (lane.getBottom() - ruler.getY()));
+            g.fillRect(sampleToX(pp) - 1.0f, (float) ruler.getY(), 2.0f, (float) (lane.getBottom() - ruler.getY()));
         }
 
         drawRuler(g, ruler);
@@ -129,7 +132,7 @@ public:
         {
             g.setColour(juce::Colours::white.withAlpha(0.45f));
             g.drawText("Click / drag: select   Right-click or 1-" + juce::String(juce::jmax(1, activeCount()))
-                           + ": set drum   Del: delete   Drag block: move   Q: quantize   Ctrl+Z: undo   Wheel: zoom   Click ruler: play",
+                           + ": set drum   Del: delete   Drag block: move   Q: quantize   Ctrl+Z: undo   Wheel: zoom   Click ruler: play   Drag bottom bars: volume",
                        head.reduced(6, 0), juce::Justification::centredRight, true);
         }
         int x = head.getX() + 6, n = 0;
@@ -171,6 +174,17 @@ public:
             return;
         }
 
+        if (volArea().toFloat().contains(p))   // volume lane: select the segment; dragging sets its volume
+        {
+            const int v = segmentAt(s);
+            if (v < 0) return;
+            if (e.mods.isShiftDown() || e.mods.isCommandDown()) sel[(size_t) v] = !sel[(size_t) v];
+            else if (!sel[(size_t) v]) selectOnly(v);
+            if (sel[(size_t) v]) { drag = Drag::vol; dragOrig = hits; }
+            repaint();
+            return;
+        }
+
         const int g = grabAt(p);
         if (g >= 0)
         {
@@ -199,6 +213,15 @@ public:
         if (drag == Drag::none) return;
         if (!dragged && e.getDistanceFromDragStart() < 3) return;
         dragged = true;
+        if (drag == Drag::vol)
+        {
+            const auto vl = volArea();
+            const float v = std::round(juce::jlimit(0.0f, 1.0f, (float) (vl.getBottom() - e.position.y) / (float) vl.getHeight()) * 100.0f) / 100.0f;
+            for (size_t i = 0; i < hits.size(); ++i)
+                if (sel[i]) hits[i].vol = v;
+            publish();   // plays with the new volume straight away
+            return;
+        }
         const double s = xToSample(e.position.x);
         if (drag == Drag::range)
         {
@@ -230,9 +253,8 @@ public:
             else selectOnly(h);
             if (h >= 0 && sel[(size_t) h]) audition(h);
         }
-        else if (drag == Drag::move && dragged)
+        else if ((drag == Drag::move || drag == Drag::vol) && dragged)
         {
-            pushUndo(dragOrig);
             publish();
         }
         drag = Drag::none;
@@ -243,8 +265,10 @@ public:
     void mouseMove(const juce::MouseEvent& e) override
     {
         const int h = proc.isRecording() ? -1 : hitAt(e.position);
-        setMouseCursor(!proc.isRecording() && grabAt(e.position) >= 0 ? juce::MouseCursor::LeftRightResizeCursor
-                                                                       : juce::MouseCursor::NormalCursor);
+        const bool inVol = !proc.isRecording() && volArea().toFloat().contains(e.position) && segmentAt(xToSample(e.position.x)) >= 0;
+        setMouseCursor(inVol ? juce::MouseCursor::UpDownResizeCursor
+                             : (!proc.isRecording() && grabAt(e.position) >= 0 ? juce::MouseCursor::LeftRightResizeCursor
+                                                                               : juce::MouseCursor::NormalCursor));
         if (h != hover) { hover = h; repaint(); }
     }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
@@ -295,7 +319,6 @@ public:
     void quantize()
     {
         if (proc.isRecording() || hits.empty()) return;
-        pushUndo(hits);
         proc.quantize(hits, sel, selectedCount() > 0);
         hover = -1;
         publish();
@@ -306,12 +329,15 @@ public:
 
 private:
     static constexpr int PK = 128;   // samples per cached waveform peak
-    enum class Drag { none, range, move };
+    enum class Drag { none, range, move, vol };
+    static constexpr int VOLH = 44;   // height of the volume lane
 
     juce::Rectangle<int> headerArea() const { return getLocalBounds().removeFromTop(18); }
     juce::Rectangle<int> rulerArea() const { return getLocalBounds().withTrimmedTop(18).removeFromTop(14); }
     juce::Rectangle<int> laneArea() const { return getLocalBounds().removeFromBottom(24); }
-    juce::Rectangle<int> waveArea() const { return getLocalBounds().withTrimmedTop(32).withTrimmedBottom(24); }
+    int volH() const { return juce::jlimit(24, VOLH, (getHeight() - 56) / 3); }   // shrinks when the clip is short
+    juce::Rectangle<int> volArea() const { return getLocalBounds().withTrimmedBottom(24).removeFromBottom(volH()); }
+    juce::Rectangle<int> waveArea() const { return getLocalBounds().withTrimmedTop(32).withTrimmedBottom(24 + volH()); }
 
     double xToSample(float x) const { return viewStart + (double) x / juce::jmax(1, getWidth()) * viewLen; }
     float sampleToX(double s) const { return (float) ((s - viewStart) / viewLen * getWidth()); }
@@ -397,16 +423,9 @@ private:
         knownVersion = proc.getHitsVersion();
         repaint();
     }
-    void pushUndo(std::vector<RecHit> before)
-    {
-        undoStack.push_back(std::move(before));
-        if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
-        redoStack.clear();
-    }
     void assignSelected(int slot)
     {
         if (selectedCount() == 0) return;
-        pushUndo(hits);
         for (size_t i = 0; i < hits.size(); ++i)
             if (sel[i]) hits[i].slot = slot;
         publish();
@@ -414,7 +433,6 @@ private:
     void deleteSelected()
     {
         if (selectedCount() == 0) return;
-        pushUndo(hits);
         std::vector<RecHit> h;
         for (size_t i = 0; i < hits.size(); ++i)
             if (!sel[i]) h.push_back(hits[i]);
@@ -425,33 +443,15 @@ private:
     }
     void addHit(double s, int slot)
     {
-        pushUndo(hits);
         hits.push_back({ (juce::int64) juce::jmax(0.0, s), slot, 0.8f });
         sel.assign(hits.size(), 0);
         sel.back() = 1;
         sortHits();
         publish();
     }
-    void undo()
-    {
-        if (undoStack.empty()) return;
-        redoStack.push_back(hits);
-        hits = undoStack.back();
-        undoStack.pop_back();
-        sel.assign(hits.size(), 0);
-        hover = -1;
-        publish();
-    }
-    void redo()
-    {
-        if (redoStack.empty()) return;
-        undoStack.push_back(hits);
-        hits = redoStack.back();
-        redoStack.pop_back();
-        sel.assign(hits.size(), 0);
-        hover = -1;
-        publish();
-    }
+    // undo / redo cover everything in the plugin, not just the clip (see BeatboxProcessor::undoTick)
+    void undo() { proc.undoStep(); }
+    void redo() { proc.redoStep(); }
 
     void showMenu(double s)
     {
@@ -472,6 +472,7 @@ private:
             }
             m.addItem(1, "Delete   (Del)");
             m.addItem(3, "Listen");
+            m.addItem(9, "Reset volume to automatic");
             m.addItem(2, "Teach these to their drums (improves detection)");
             m.addSeparator();
         }
@@ -480,8 +481,8 @@ private:
         m.addSubMenu("Add hit here", add, s >= 0 && s < len);
         m.addSeparator();
         m.addItem(4, "Select all   (Ctrl+A)", !hits.empty());
-        m.addItem(5, "Undo   (Ctrl+Z)", !undoStack.empty());
-        m.addItem(6, "Redo   (Ctrl+Y)", !redoStack.empty());
+        m.addItem(5, "Undo   (Ctrl+Z)", proc.canUndo());
+        m.addItem(6, "Redo   (Ctrl+Y)", proc.canRedo());
         m.addItem(7, "Zoom to fit");
         m.addItem(8, nSel > 0 ? "Quantize selected   (Q)" : "Quantize all   (Q)", !hits.empty());
 
@@ -519,6 +520,14 @@ private:
                                              hits[(size_t) a].sample + (juce::int64) (4.0 * proc.getRate())));
                 break;
             }
+            case 9:
+                if (selectedCount() > 0)
+                {
+                    for (size_t i = 0; i < hits.size(); ++i)
+                        if (sel[i]) hits[i].vol = -1.0f;
+                    publish();
+                }
+                break;
             case 4: sel.assign(hits.size(), 1); break;
             case 5: undo(); break;
             case 6: redo(); break;
@@ -543,6 +552,43 @@ private:
         const double full = juce::jmax((double) proc.getRecLength() * 1.05, 8.0 * sr);
         viewLen = juce::jlimit(0.05 * sr, full, viewLen);
         viewStart = juce::jlimit(0.0, juce::jmax(0.0, full - viewLen), viewStart);
+    }
+
+    // one bar per segment; its height is the volume the drum plays at. Drag a bar to set it by hand.
+    void drawVolumeLane(juce::Graphics& g, int len)
+    {
+        const auto vl = volArea();
+        g.setColour(juce::Colour(0xff181b20));
+        g.fillRect(vl);
+        g.setColour(juce::Colours::white.withAlpha(0.07f));
+        for (float f : { 0.25f, 0.5f, 0.75f })
+            g.drawHorizontalLine((int) ((float) vl.getBottom() - f * (float) vl.getHeight()), (float) vl.getX(), (float) vl.getRight());
+        g.setFont(10.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.30f));
+        g.drawText(proc.fullLevel() ? "Volume - Full level: automatic hits play at 100%" : "Volume - follows how loud you beatboxed",
+                   vl.getRight() - 340, vl.getY() + 1, 336, 12, juce::Justification::centredRight);
+
+        for (int i = 0; i < (int) hits.size(); ++i)
+        {
+            const auto& h = hits[(size_t) i];
+            const float x0 = sampleToX((double) h.sample), x1 = sampleToX(segEnd(i, len));
+            if (x1 < 0 || x0 > (float) getWidth()) continue;
+            const bool s = sel[(size_t) i] != 0, manual = h.vol >= 0.0f;
+            const float v = juce::jlimit(0.0f, 1.0f, proc.hitVolume(h));
+            const float bh = v * (float) (vl.getHeight() - 2);
+            const juce::Rectangle<float> r(x0, (float) vl.getBottom() - bh, juce::jmax(3.0f, x1 - x0 - 1.0f), bh);
+            const auto col = hitColour(i);
+            g.setColour(col.withAlpha(manual ? (s ? 0.90f : 0.70f) : (s ? 0.60f : 0.32f)));
+            g.fillRect(r);
+            g.setColour(manual ? juce::Colours::white : col);
+            g.fillRect(r.getX(), r.getY() - 1.0f, r.getWidth(), 2.0f);
+            if ((s || i == hover) && r.getWidth() > 30.0f)
+            {
+                g.setColour(juce::Colours::white.withAlpha(0.9f));
+                g.drawText(juce::String(juce::roundToInt(v * 100.0f)) + "%" + (manual ? "" : " auto"),
+                           (int) x0 + 3, vl.getY() + 1, (int) r.getWidth() - 4, 12, juce::Justification::centredLeft);
+            }
+        }
     }
 
     // tempo grid: bar lines, beat lines and (when zoomed in enough) the quantize steps
@@ -613,7 +659,6 @@ private:
             cachedLen = 0;
             pkMin.clear(); pkMax.clear();
             peakAbs = 0;
-            undoStack.clear(); redoStack.clear();
         }
         updatePeaks(len);
 
@@ -631,7 +676,6 @@ private:
             const int ver = proc.getHitsVersion();
             if (ver != knownVersion)   // re-analysed (or first look)
             {
-                if (!wasRecording && knownVersion >= 0 && !hits.empty()) pushUndo(hits);   // so Analyse can be undone
                 if (wasRecording || knownVersion < 0) zoomToFit();
                 knownVersion = ver;
                 const auto h = proc.getRecHits();
@@ -642,9 +686,9 @@ private:
             }
             else if (wasRecording) zoomToFit();
 
-            if (proc.isPlaying())   // keep the playhead in view
+            if (proc.isPlaying() || proc.isPlayingOriginal())   // keep the playhead in view
             {
-                const double pp = (double) proc.getPlayPos();
+                const double pp = proc.isPlaying() ? (double) proc.getPlayPos() : (double) proc.getOriginalPos();
                 if (pp < viewStart || pp > viewStart + viewLen) { viewStart = pp - viewLen * 0.05; clampView(); }
             }
         }
@@ -655,7 +699,6 @@ private:
     BeatboxProcessor& proc;
     std::vector<RecHit> hits;   // editable copy, sorted by time
     std::vector<char> sel;      // selection flags, parallel to hits
-    std::vector<std::vector<RecHit>> undoStack, redoStack;
     int knownVersion = -1, knownRecId = -1, hover = -1;
     bool wasRecording = false;
     double viewStart = 0, viewLen = 8.0 * 44100.0;
