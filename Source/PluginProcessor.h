@@ -38,6 +38,7 @@ public:
             pLo[s] = apvts.getRawParameterValue(pre + "lo");
             pHi[s] = apvts.getRawParameterValue(pre + "hi");
             pSyn[s] = apvts.getRawParameterValue(pre + "syn");
+            pChoke[s] = apvts.getRawParameterValue(pre + "choke");
             ex[s].reserve(MAXEX);
         }
         noiseEx.reserve(MAXNOISE);
@@ -263,6 +264,56 @@ public:
         markDirty();
     }
 
+    static juce::StringArray chokeNames()
+    {
+        juce::StringArray n { "Auto", "No choke" };
+        for (int g = 2; g < 2 + MAXD; ++g) n.add("Group " + juce::String(g - 1));
+        return n;
+    }
+
+    // Use an audio file as the take instead of recording: it replaces the current recording and is analysed
+    // straight away. Returns false if the file can't be read or a recording is in progress.
+    bool loadRecording(const juce::File& file)
+    {
+        if (recording.load() || countInLeft.load() > 0 || recBuf.empty()) return false;
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(file));
+        if (r == nullptr || r->lengthInSamples <= 0 || r->sampleRate <= 0) return false;
+
+        const double ratio = r->sampleRate / sr;
+        const juce::int64 want = (juce::int64) ((double) juce::jmin<juce::int64>(r->lengthInSamples, (juce::int64) (r->sampleRate * 31.0)) / ratio);
+        const int outLen = (int) juce::jmin<juce::int64>(want, (juce::int64) recBuf.size());   // keeps the first 30 s
+        const int inLen = (int) juce::jmin<juce::int64>(r->lengthInSamples, (juce::int64) std::ceil((double) outLen * ratio) + 4);
+        if (outLen <= 0) return false;
+
+        juce::AudioBuffer<float> b((int) r->numChannels, inLen);
+        r->read(&b, 0, inLen, 0, true, true);
+        std::vector<float> mono((size_t) inLen + 8, 0.0f);   // padding: the interpolator reads a few samples ahead
+        for (int c = 0; c < b.getNumChannels(); ++c)
+            for (int i = 0; i < inLen; ++i)
+                mono[(size_t) i] += b.getSample(c, i) / (float) b.getNumChannels();
+
+        stopPlayback();
+        stopOriginal();
+        std::vector<float> out((size_t) outLen);
+        if (std::abs(ratio - 1.0) < 1.0e-6) std::copy(mono.begin(), mono.begin() + outLen, out.begin());
+        else
+        {
+            juce::LagrangeInterpolator li;
+            li.process(ratio, mono.data(), out.data(), outLen);
+        }
+
+        std::copy(out.begin(), out.end(), recBuf.begin());
+        recLen.store(outLen, std::memory_order_release);
+        recBpm.store(getTempo());
+        liveHitN.store(0);
+        setRecHits({});
+        recId.store(recIdMax.fetch_add(1) + 1);
+        analyseRecording();
+        return true;
+    }
+
     //---- recording / analysis / playback
     void startRecording()
     {
@@ -444,13 +495,14 @@ public:
         const auto hits = getRecHits();
         if (hits == nullptr || hits->empty()) return false;
 
-        bool on[MAXD]; float lvl[MAXD]; int syn[MAXD];
+        bool on[MAXD]; float lvl[MAXD]; int syn[MAXD], choke[MAXD];
         std::shared_ptr<const Sample> smp[MAXD];
         for (int s = 0; s < MAXD; ++s)
         {
             on[s] = pOn[s]->load() > 0.5f;
             lvl[s] = juce::Decibels::decibelsToGain(pLvl[s]->load());
             syn[s] = (int) pSyn[s]->load();
+            choke[s] = (int) pChoke[s]->load();
         }
         { const juce::SpinLock::ScopedLockType l(sampleLock); for (int s = 0; s < MAXD; ++s) smp[s] = samples[s]; }
 
@@ -465,9 +517,10 @@ public:
             {
                 const auto& h = (*hits)[idx++];
                 if (!on[h.slot] || syn[h.slot] == SYN_IGNORE) continue;
-                if (syn[h.slot] == SYN_HAT)
+                const int grp = chokeGroupOf(choke[h.slot], syn[h.slot]);
+                if (grp >= 0)
                     for (int o = 0; o < MAXD; ++o)
-                        if (o != h.slot && syn[o] == SYN_OPEN) vs[o].on = false;
+                        if (o != h.slot && chokeGroupOf(choke[o], syn[o]) == grp) vs[o].on = false;
                 const float hv = hitVolume(h);
                 if (hv <= 0.001f) continue;   // muted
                 auto& v = vs[h.slot];
@@ -828,6 +881,8 @@ private:
             l.add(std::make_unique<juce::AudioParameterChoice>(
                 pre + "syn", nm + "Type",
                 juce::StringArray { "Kick", "Snare", "Hat", "Open Hat", "Tom", "Ignore" }, s < 3 ? s : SYN_TOM));
+            l.add(std::make_unique<juce::AudioParameterChoice>(
+                pre + "choke", nm + "Choke Group", chokeNames(), CHOKE_AUTO));
         }
         return l;
     }
@@ -1072,9 +1127,10 @@ private:
         hitCount[s].fetch_add(1);
         const int syn = (int) pSyn[s]->load();
         if (syn == SYN_IGNORE || vel <= 0.001f) return;
-        if (syn == SYN_HAT)   // closed hat chokes open hats
+        const int grp = chokeGroupOf((int) pChoke[s]->load(), syn);
+        if (grp >= 0)   // cut off the other drums in this drum's choke group
             for (int o = 0; o < MAXD; ++o)
-                if (o != s && (int) pSyn[o]->load() == SYN_OPEN) voices[o].on = false;
+                if (o != s && chokeGroupOf((int) pChoke[o]->load(), (int) pSyn[o]->load()) == grp) voices[o].on = false;
         auto& v = voices[s];
         v.on = true; v.t = 0; v.ph = 0; v.prev = 0; v.pos = 0; v.vel = vel;
         const juce::SpinLock::ScopedTryLockType l(sampleLock);
@@ -1170,7 +1226,7 @@ private:
     std::vector<float> dryBuf;
 
     std::atomic<float>* pOn[MAXD]; std::atomic<float>* pLvl[MAXD]; std::atomic<float>* pLo[MAXD];
-    std::atomic<float>* pHi[MAXD]; std::atomic<float>* pSyn[MAXD];
+    std::atomic<float>* pHi[MAXD]; std::atomic<float>* pSyn[MAXD]; std::atomic<float>* pChoke[MAXD];
     static constexpr int MAXNOISE = 128, KIT_FORMAT = 2, KNN = 3;
     static constexpr double RETRIG_MS = 80.0, ECHO_MS = 220.0;
     static constexpr float ECHO_RATIO = 0.6f;

@@ -4,9 +4,25 @@
 //==============================================================================
 // The recorded clip: waveform + detected hits. Scrolls live while recording; afterwards hits can be
 // selected (click, shift-click, drag a range), re-assigned to another drum, moved, added or deleted.
-class ClipView : public juce::Component, private juce::Timer
+class ClipView : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
+    // drop a beatbox audio file here to use it as the take (instead of recording) and analyse it
+    bool isInterestedInFileDrag(const juce::StringArray& files) override
+    {
+        for (auto& f : files) if (isAudioFile(juce::File(f))) return true;
+        return false;
+    }
+    void fileDragEnter(const juce::StringArray&, int, int) override { dropHover = true; repaint(); }
+    void fileDragExit(const juce::StringArray&) override { dropHover = false; repaint(); }
+    void filesDropped(const juce::StringArray& files, int, int) override
+    {
+        dropHover = false;
+        for (auto& f : files)
+            if (isAudioFile(juce::File(f))) { proc.loadRecording(juce::File(f)); break; }
+        repaint();
+    }
+
     explicit ClipView(BeatboxProcessor& p) : proc(p)
     {
         setWantsKeyboardFocus(true);
@@ -272,6 +288,16 @@ public:
         if (h != hover) { hover = h; repaint(); }
     }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+
+    void paintOverChildren(juce::Graphics& g) override
+    {
+        if (!dropHover) return;
+        g.setColour(juce::Colour(0xff2d6cdf).withAlpha(0.25f));
+        g.fillRect(getLocalBounds());
+        g.setColour(juce::Colours::white);
+        g.setFont(15.0f);
+        g.drawText("Drop to use this audio as the take", getLocalBounds(), juce::Justification::centred);
+    }
 
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
@@ -656,6 +682,7 @@ private:
         if (id != knownRecId || len < cachedLen)   // new take
         {
             knownRecId = id;
+            newTake = true;
             cachedLen = 0;
             pkMin.clear(); pkMax.clear();
             peakAbs = 0;
@@ -676,7 +703,8 @@ private:
             const int ver = proc.getHitsVersion();
             if (ver != knownVersion)   // re-analysed (or first look)
             {
-                if (wasRecording || knownVersion < 0) zoomToFit();
+                if (wasRecording || knownVersion < 0 || newTake) zoomToFit();
+                newTake = false;
                 knownVersion = ver;
                 const auto h = proc.getRecHits();
                 hits = h != nullptr ? *h : std::vector<RecHit>();
@@ -700,7 +728,7 @@ private:
     std::vector<RecHit> hits;   // editable copy, sorted by time
     std::vector<char> sel;      // selection flags, parallel to hits
     int knownVersion = -1, knownRecId = -1, hover = -1;
-    bool wasRecording = false;
+    bool wasRecording = false, newTake = false, dropHover = false;
     double viewStart = 0, viewLen = 8.0 * 44100.0;
 
     std::vector<float> pkMin, pkMax;

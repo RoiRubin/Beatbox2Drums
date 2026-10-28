@@ -9,11 +9,21 @@
 #include <array>
 #include <vector>
 
-static constexpr const char* BB_VERSION = "1.4";   // shown in the editor's bottom-left corner
+static constexpr const char* BB_VERSION = "1.5";   // shown in the editor's bottom-left corner
 static constexpr int MAXD = 8;     // max drums
 static constexpr int NF = 2 * (12 + 2) + 1;   // features per hit: 2 sub-windows x (12 MFCC + brightness + noisiness) + decay
-static constexpr int MAXEX = 64;              // training examples kept per drum (oldest dropped)
+static constexpr int MAXEX = 256;             // training examples kept per drum (oldest dropped)
 static constexpr int SYN_KICK = 0, SYN_SNARE = 1, SYN_HAT = 2, SYN_OPEN = 3, SYN_TOM = 4, SYN_IGNORE = 5;
+
+// Choke groups: a drum that plays cuts off every other drum in its group. Choice index 0 = Auto (closed and
+// open hats choke each other, everything else plays independently), 1 = Off, 2.. = explicit group 1, 2, ...
+static constexpr int CHOKE_AUTO = 0, CHOKE_OFF = 1;
+static constexpr int AUTO_HAT_GROUP = 1000;
+static inline int chokeGroupOf(int choice, int syn)
+{
+    if (choice == CHOKE_AUTO) return (syn == SYN_HAT || syn == SYN_OPEN) ? AUTO_HAT_GROUP : -1;
+    return choice == CHOKE_OFF ? -1 : choice;
+}
 
 static juce::Colour slotColour(int i)
 {

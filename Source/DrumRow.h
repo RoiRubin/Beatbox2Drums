@@ -20,6 +20,12 @@ public:
         typeAtt = std::make_unique<CA>(p.apvts, pre + "syn", type);
         addAndMakeVisible(type);
 
+        choke.addItemList(BeatboxProcessor::chokeNames(), 1);
+        chokeAtt = std::make_unique<CA>(p.apvts, pre + "choke", choke);
+        choke.setTooltip("Choke group: when this drum plays it cuts off the other drums in the same group. "
+                         "Auto = hats and open hats choke each other; No choke = plays independently.");
+        addAndMakeVisible(choke);
+
         for (auto* sl : { &lvl, &lo, &hi })
         {
             sl->setSliderStyle(juce::Slider::LinearBar);
@@ -102,6 +108,7 @@ public:
         r.removeFromLeft(24);
         name.setBounds(r.removeFromLeft(90));       r.removeFromLeft(4);
         type.setBounds(r.removeFromLeft(90));       r.removeFromLeft(4);
+        choke.setBounds(r.removeFromLeft(84));      r.removeFromLeft(4);
         load.setBounds(r.removeFromLeft(100));      r.removeFromLeft(4);
         synthBtn.setBounds(r.removeFromLeft(55));   r.removeFromLeft(4);
         train.setBounds(r.removeFromLeft(60));      r.removeFromLeft(4);
@@ -120,11 +127,11 @@ private:
     int slot;
     bool hover = false;
     juce::TextEditor name;
-    juce::ComboBox type;
+    juce::ComboBox type, choke;
     juce::Slider lvl, lo, hi;
     juce::TextButton train { "Train" }, clear { "Clear" }, load { "Load sample" }, synthBtn { "Synth" }, remove { "X" };
     juce::Label count;
     std::unique_ptr<juce::FileChooser> chooser;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, chokeAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lvlAtt, loAtt, hiAtt;
 };

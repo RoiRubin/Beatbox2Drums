@@ -105,7 +105,7 @@ public:
         {
             g.setColour(juce::Colours::white.withAlpha(0.35f));
             g.setFont(12.0f);
-            g.drawText("Drop a sample here to create a new drum", getWidth() - 340, getHeight() - 36, 330, 20,
+            g.drawText("Drop a sample here to create a new drum (drop a beatbox take on the clip)", getWidth() - 480, getHeight() - 36, 470, 20,
                        juce::Justification::centredRight);
         }
     }
